@@ -39,6 +39,7 @@ D,D,,6.0,7.0,,
        {path{kCalendarDatesFile}, std::string{R"(service_id,date,exception_type
 S_RE1,20190503,1
 S_RE2,20190504,1
+S_RE2,20190506,1
 )"}},
        {path{kRoutesFile},
         std::string{
@@ -131,6 +132,33 @@ TEST(rt, gtfsrt_resolve_static_trip) {
     auto const [r, t] = rt::gtfsrt_resolve_run(date::sys_days{2019_y / May / 4},
                                                tt, &rtt, source_idx_t{0}, td);
     ASSERT_TRUE(r.valid());
+  }
+}
+
+TEST(rt, gtfsrt_resolve_adjacent_service_day) {
+  auto tt = timetable{};
+  tt.date_range_ = {date::sys_days{2019_y / March / 25},
+                    date::sys_days{2019_y / November / 1}};
+  load_timetable({}, source_idx_t{0}, test_files(), tt);
+
+  {
+    auto td = transit_realtime::TripDescriptor();
+    td.set_trip_id("T_RE1");
+
+    auto const [r, t] = rt::gtfsrt_resolve_run(date::sys_days{2019_y / May / 4},
+                                               tt, nullptr, source_idx_t{0}, td);
+    ASSERT_TRUE(r.valid());
+    EXPECT_EQ(date::sys_days{2019_y / May / 4},
+              tt.internal_interval_days().from_ + to_idx(r.t_.day_) * 1_days);
+  }
+
+  {
+    auto td = transit_realtime::TripDescriptor();
+    td.set_trip_id("T_RE2");
+
+    auto const [r, t] = rt::gtfsrt_resolve_run(date::sys_days{2019_y / May / 5},
+                                               tt, nullptr, source_idx_t{0}, td);
+    EXPECT_FALSE(r.valid());
   }
 }
 

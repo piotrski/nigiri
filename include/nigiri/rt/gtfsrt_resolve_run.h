@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string_view>
+#include <vector>
 
 #include "utl/parser/arg_parser.h"
 
@@ -129,8 +130,43 @@ void resolve_static(date::sys_days const today,
                               : std::nullopt;
 
   if (td.has_trip_id()) {
-    resolve_static_trip_id(today, tt, src, td.trip_id(), start_date, start_time,
-                           std::forward<Fn>(fn));
+    if (start_date.has_value()) {
+      resolve_static_trip_id(today, tt, src, td.trip_id(), start_date,
+                             start_time, std::forward<Fn>(fn));
+      return;
+    }
+
+    using match_t = std::pair<run, trip_idx_t>;
+    auto const collect_matches = [&](date::sys_days const service_day) {
+      auto matches = std::vector<match_t>{};
+      resolve_static_trip_id(
+          service_day, tt, src, td.trip_id(), std::nullopt, start_time,
+          [&](run const r, trip_idx_t const trip) {
+            matches.emplace_back(r, trip);
+            return utl::continue_t::kContinue;
+          });
+      return matches;
+    };
+    auto const emit_matches = [&](std::vector<match_t> const& matches) {
+      for (auto const& [r, trip] : matches) {
+        if (fn(r, trip) == utl::continue_t::kBreak) {
+          break;
+        }
+      }
+    };
+
+    auto const today_matches = collect_matches(today);
+    if (!today_matches.empty()) {
+      emit_matches(today_matches);
+      return;
+    }
+
+    auto const previous_matches = collect_matches(today - date::days{1});
+    auto const next_matches = collect_matches(today + date::days{1});
+    if (previous_matches.empty() == next_matches.empty()) {
+      return;
+    }
+    emit_matches(previous_matches.empty() ? next_matches : previous_matches);
   } else {
     utl_verify(td.has_route_id() && td.has_direction_id() &&
                    start_time.has_value() && start_date.has_value(),
