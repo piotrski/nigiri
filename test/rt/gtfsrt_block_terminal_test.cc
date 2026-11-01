@@ -295,7 +295,8 @@ TEST(rt, block_terminal_late_arrival_after_next_departure) {
 }
 
 // The departure hold is independent of the entity order, also when the
-// outgoing trip has an (earlier, contradicting) prediction.
+// outgoing trip has an (earlier, contradicting) prediction. Downstream, the
+// outgoing trip keeps its own +3 min; the hold only keeps times monotonic.
 TEST(rt, block_terminal_late_arrival_holds_explicit_departure_in_any_order) {
   auto const tt = load_block_timetable();
   auto const incoming = trip_update{
@@ -312,7 +313,68 @@ TEST(rt, block_terminal_late_arrival_holds_explicit_departure_in_any_order) {
     auto const fr = block(tt, rtt);
     EXPECT_EQ(local(21h + 47min), fr[2].time(kArr));
     EXPECT_EQ(local(21h + 47min), fr[2].time(kDep));
+    EXPECT_EQ(local(21h + 48min), fr[3].time(kArr));
+    EXPECT_EQ(local(21h + 48min), fr[3].time(kDep));
+    EXPECT_EQ(local(21h + 53min), fr[4].time(kArr));
+    EXPECT_EQ(local(22h), fr[4].time(kDep));
   }
+}
+
+// Same with a relative (delay) prediction for the outgoing departure.
+TEST(rt, block_terminal_late_arrival_holds_delayed_departure_in_any_order) {
+  auto const tt = load_block_timetable();
+  auto const incoming = trip_update{
+      .trip_id_ = "T1", .stops_ = {{.stop_id_ = "B", .arr_ = 21h + 47min}}};
+  auto const outgoing =
+      test::to_feed_msg({test::trip{.trip_id_ = "T2",
+                                    .delays_ = {{.stop_id_ = "B",
+                                                 .ev_type_ = kDep,
+                                                 .delay_minutes_ = 3}}}},
+                        kDay + 20h);
+
+  for (auto const incoming_first : {true, false}) {
+    SCOPED_TRACE(incoming_first ? "T1 first" : "T2 first");
+    auto rtt = rt::create_rt_timetable(tt, kDay);
+    if (incoming_first) {
+      EXPECT_EQ(1U, apply(tt, rtt, {incoming}));
+    }
+    EXPECT_EQ(1U,
+              rt::gtfsrt_update_msg(tt, rtt, source_idx_t{0}, "ZTP", outgoing)
+                  .total_entities_success_);
+    if (!incoming_first) {
+      EXPECT_EQ(1U, apply(tt, rtt, {incoming}));
+    }
+
+    auto const fr = block(tt, rtt);
+    EXPECT_EQ(local(21h + 47min), fr[2].time(kArr));
+    EXPECT_EQ(local(21h + 47min), fr[2].time(kDep));
+    EXPECT_EQ(local(21h + 48min), fr[3].time(kArr));
+    EXPECT_EQ(local(21h + 53min), fr[4].time(kArr));
+    EXPECT_EQ(local(22h), fr[4].time(kDep));
+  }
+}
+
+// A later update of the outgoing trip that starts after its first stop
+// keeps the earlier departure prediction instead of resetting it to the
+// schedule (upstream nigiri #419 starts without a propagated delay).
+TEST(rt, block_terminal_later_update_keeps_departure_prediction) {
+  auto const tt = load_block_timetable();
+  auto rtt = rt::create_rt_timetable(tt, kDay);
+
+  EXPECT_EQ(1U, apply(tt, rtt,
+                      {{.trip_id_ = "T2",
+                        .stops_ = {{.stop_id_ = "B", .dep_ = 21h + 42min}}}}));
+  EXPECT_EQ(1U, apply(tt, rtt,
+                      {{.trip_id_ = "T2",
+                        .stops_ = {{.stop_id_ = "D", .arr_ = 21h + 49min}}}}));
+
+  auto const fr = block(tt, rtt);
+  EXPECT_EQ(local(21h + 30min), fr[2].time(kArr));
+  EXPECT_EQ(local(21h + 42min), fr[2].time(kDep));
+  EXPECT_EQ(local(21h + 49min), fr[3].time(kArr));
+  EXPECT_EQ(local(21h + 49min), fr[3].time(kDep));
+  EXPECT_EQ(local(21h + 54min), fr[4].time(kArr));
+  EXPECT_EQ(local(22h), fr[4].time(kDep));
 }
 
 // (c) Inside a trip, an arrival without departure still propagates to that
