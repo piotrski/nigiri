@@ -160,7 +160,16 @@ delay_propagation update_event(timetable const& tt,
                         : rt_data_state::kPredicted);
     rtt.dispatch_delay(r, stop_idx, ev_type,
                        lower_bounded_new_time - static_time);
-    return {lower_bounded_new_time, lower_bounded_new_time - static_time};
+    // At a trip's first departure, the lower bound is the previous trip's
+    // arrival (shared stop of a block). It holds this departure, but only the
+    // trip's own delay is propagated, like for relative updates. Otherwise the
+    // result would depend on the order of the trips' updates.
+    auto const is_first_dep_of_trip = r.is_scheduled() &&
+                                      ev_type == event_type::kDep &&
+                                      stop_idx == r.stop_range_.from_;
+    return {lower_bounded_new_time,
+            (is_first_dep_of_trip ? new_time : lower_bounded_new_time) -
+                static_time};
   }
 }
 
