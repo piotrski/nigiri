@@ -344,6 +344,11 @@ bool update_run(source_idx_t const src,
                   : std::nullopt;
   auto stop_idx =
       r.is_scheduled() ? r.stop_range_.from_ : static_cast<unsigned short>(0U);
+  // Trips of a block share one transport: the last stop of this trip is the
+  // first stop of the next one. Its departure belongs to the next trip.
+  auto const last_stop_idx_of_trip =
+      r.is_scheduled() ? static_cast<stop_idx_t>(r.stop_range_.to_ - 1U)
+                       : static_cast<stop_idx_t>(location_seq.size() - 1U);
   auto seq_it = begin(seq_numbers);
   auto const& stus = tripUpdate.stop_time_update();
   auto upd_it = begin(stus);
@@ -440,7 +445,7 @@ bool update_run(source_idx_t const src,
       // propagation.
       pred = update_event(tt, rtt, r, stop_idx, event_type::kDep,
                           upd_it->arrival(), unixtime_t{0_minutes});
-    } else if (stop_idx != location_seq.size() - 1U) {
+    } else if (stop_idx != last_stop_idx_of_trip) {
       if (matches && upd_it->has_departure() &&
           (upd_it->departure().has_time() || upd_it->departure().has_delay())) {
         pred = update_event(
