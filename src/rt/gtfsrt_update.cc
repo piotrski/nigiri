@@ -360,12 +360,26 @@ bool update_run(source_idx_t const src,
   auto upd_it = begin(stus);
   for (; seq_it != end(seq_numbers); ++stop_idx, ++seq_it) {
     auto const loc_idx = stop{location_seq[stop_idx]}.location_idx();
+    // A stop_id match is ignored if the update's stop_sequence names a later
+    // stop of this trip (e.g. the second visit of a loop's first stop).
+    auto const sequence_names_later_stop = [&]() {
+      if (!r.is_scheduled() || !upd_it->has_stop_sequence()) {
+        return false;
+      }
+      for (auto it = std::next(seq_it); it != end(seq_numbers); ++it) {
+        if (*it == upd_it->stop_sequence()) {
+          return true;
+        }
+      }
+      return false;
+    };
     auto const matches =
         upd_it != end(stus) &&
         ((r.is_scheduled() && upd_it->has_stop_sequence() &&
           upd_it->stop_sequence() == *seq_it) ||
          (upd_it->has_stop_id() &&
-          upd_it->stop_id() == tt.locations_.ids_[loc_idx].view()));
+          upd_it->stop_id() == tt.locations_.ids_[loc_idx].view() &&
+          !sequence_names_later_stop()));
 
     if (matches) {
       auto& stp = rtt.rt_transport_location_seq_[r.rt_][stop_idx];
