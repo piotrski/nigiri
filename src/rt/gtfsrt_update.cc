@@ -854,6 +854,7 @@ statistics gtfsrt_update_msg(timetable const& tt,
       auto is_resolved_static = false;
       resolve_static(today, tt, src, td, [&](run r, trip_idx_t trip) {
         is_resolved_static = true;
+        auto translated = std::optional<gtfsrt::TripUpdate>{};
 
         if (!td.has_start_date() &&
             sr != gtfsrt::TripDescriptor_ScheduleRelationship_CANCELED) {
@@ -869,6 +870,13 @@ statistics gtfsrt_update_msg(timetable const& tt,
                 {{"entity.id", entity.id()}, {"trip.trip_id", td.trip_id()}});
             return utl::continue_t::kContinue;
           }
+          if (aligned->second != trip) {
+            // The twin may number its stops differently.
+            translated = entity.trip_update();
+            translate_stop_sequences(
+                tt, trip, aligned->second,
+                static_cast<stop_idx_t>(r.stop_range_.size()), *translated);
+          }
           std::tie(r, trip) = *aligned;
         }
 
@@ -878,7 +886,9 @@ statistics gtfsrt_update_msg(timetable const& tt,
           rtt.cancel_run(r);
           ++stats.total_entities_success_;
         } else if (!added) {
-          if (update_run(src, tt, rtt, trip, r, entity.trip_update())) {
+          if (update_run(src, tt, rtt, trip, r,
+                         translated.has_value() ? *translated
+                                                : entity.trip_update())) {
             ++stats.total_entities_success_;
           }
         }

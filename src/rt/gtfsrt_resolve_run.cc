@@ -91,39 +91,57 @@ std::vector<rt_event> match_rt_events(timetable const& tt,
     seq_numbers.push_back(seq);
   }
 
+  auto const matches_sequence = [&](auto const& stu, stop_idx_t const rel) {
+    return rel < seq_numbers.size() && stu.stop_sequence() == seq_numbers[rel];
+  };
+  auto const matches_id = [&](auto const& stu, stop_idx_t const rel) {
+    auto const loc =
+        stop{location_seq[r.stop_range_.from_ + rel]}.location_idx();
+    return stu.stop_id() == tt.locations_.ids_[loc].view();
+  };
+  auto const find = [&](auto const& stu, stop_idx_t const from,
+                        auto&& matches) -> std::optional<stop_idx_t> {
+    for (auto rel = from; rel < n_stops; ++rel) {
+      if (matches(stu, rel)) {
+        return rel;
+      }
+    }
+    return std::nullopt;
+  };
+
   auto events = std::vector<rt_event>{};
   auto next_rel = stop_idx_t{0U};
   for (auto const& stu : tu.stop_time_update()) {
+    // stop_sequence identifies a stop even if the trip visits it twice.
+    auto rel = std::optional<stop_idx_t>{};
+    if (stu.has_stop_sequence()) {
+      rel = find(stu, next_rel, matches_sequence);
+    }
+    if (!rel.has_value() && stu.has_stop_id()) {
+      rel = find(stu, next_rel, matches_id);
+    }
+    if (!rel.has_value()) {
+      continue;
+    }
+    next_rel = static_cast<stop_idx_t>(*rel + 1U);
+
+    // Skipped stops only move the cursor: their times carry no information.
     if (stu.schedule_relationship() ==
         transit_realtime::
             TripUpdate_StopTimeUpdate_ScheduleRelationship_SKIPPED) {
       continue;
     }
-    for (auto rel = next_rel; rel < n_stops; ++rel) {
-      auto const loc =
-          stop{location_seq[r.stop_range_.from_ + rel]}.location_idx();
-      auto const matches =
-          (stu.has_stop_sequence() && rel < seq_numbers.size() &&
-           stu.stop_sequence() == seq_numbers[rel]) ||
-          (stu.has_stop_id() &&
-           stu.stop_id() == tt.locations_.ids_[loc].view());
-      if (!matches) {
-        continue;
-      }
-      if (rel != 0U && stu.arrival().has_time()) {
-        events.push_back(
-            {rel, event_type::kArr,
-             std::chrono::time_point_cast<i32_minutes>(date::sys_seconds{
-                 std::chrono::seconds{stu.arrival().time()}})});
-      }
-      if (rel != n_stops - 1U && stu.departure().has_time()) {
-        events.push_back(
-            {rel, event_type::kDep,
-             std::chrono::time_point_cast<i32_minutes>(date::sys_seconds{
-                 std::chrono::seconds{stu.departure().time()}})});
-      }
-      next_rel = static_cast<stop_idx_t>(rel + 1U);
-      break;
+    if (*rel != 0U && stu.arrival().has_time()) {
+      events.push_back(
+          {*rel, event_type::kArr,
+           std::chrono::time_point_cast<i32_minutes>(
+               date::sys_seconds{std::chrono::seconds{stu.arrival().time()}})});
+    }
+    if (*rel != n_stops - 1U && stu.departure().has_time()) {
+      events.push_back(
+          {*rel, event_type::kDep,
+           std::chrono::time_point_cast<i32_minutes>(date::sys_seconds{
+               std::chrono::seconds{stu.departure().time()}})});
     }
   }
   return events;
@@ -176,6 +194,23 @@ bool same_schedule(timetable const& tt,
     }
   }
   return true;
+}
+
+// Local time of day of the run's first departure, in its agency's timezone
+// (UTC if unknown). Twins have the same GTFS departure time, so their runs
+// depart at the same local time of day, also across DST changes.
+duration_t local_departure_time_of_day(timetable const& tt, run const& r) {
+  auto const t = tt.event_time(r.t_, r.stop_range_.from_, event_type::kDep);
+  auto local = local_time{t.time_since_epoch()};
+  auto const providers = tt.transport_section_providers_[r.t_.t_idx_];
+  if (!providers.empty()) {
+    auto const tz = tt.providers_[providers.front()].tz_;
+    if (tz != timezone_idx_t::invalid()) {
+      local = to_local_time(tt.timezones_[tz], t);
+    }
+  }
+  return std::chrono::duration_cast<duration_t>(
+      local - std::chrono::floor<date::days>(local));
 }
 
 // Largest absolute difference between the realtime events and the run.
@@ -246,6 +281,10 @@ std::optional<std::pair<run, trip_idx_t>> align_run_to_rt_times(
       auto const cand = run{
           .t_ = transport{t, day_idx_t{static_cast<day_idx_t::value_t>(day)}},
           .stop_range_ = stop_range};
+      if (local_departure_time_of_day(tt, cand) !=
+          local_departure_time_of_day(tt, r)) {
+        continue;  // a neighboring departure, not the same schedule
+      }
       auto const off = max_offset(tt, cand, events);
       if (off < best_offset || (off == best_offset && !best.has_value())) {
         best = std::pair{cand, candidate};
@@ -265,6 +304,36 @@ std::optional<std::pair<run, trip_idx_t>> align_run_to_rt_times(
     }
   }
   return best;
+}
+
+void translate_stop_sequences(timetable const& tt,
+                              trip_idx_t const from,
+                              trip_idx_t const to,
+                              stop_idx_t const n_stops,
+                              transit_realtime::TripUpdate& tu) {
+  auto const to_vec = [&](trip_idx_t const trip) {
+    auto v = std::vector<stop_idx_t>{};
+    for (auto const seq : loader::gtfs::stop_seq_number_range{
+             {tt.trip_stop_seq_numbers_[trip]}, n_stops}) {
+      v.push_back(seq);
+    }
+    return v;
+  };
+  auto const from_seq = to_vec(from);
+  auto const to_seq = to_vec(to);
+  auto next = std::size_t{0U};
+  for (auto& stu : *tu.mutable_stop_time_update()) {
+    if (!stu.has_stop_sequence()) {
+      continue;
+    }
+    for (auto i = next; i < from_seq.size() && i < to_seq.size(); ++i) {
+      if (from_seq[i] == stu.stop_sequence()) {
+        stu.set_stop_sequence(to_seq[i]);
+        next = i + 1U;
+        break;
+      }
+    }
+  }
 }
 
 std::pair<run, trip_idx_t> gtfsrt_resolve_run(
