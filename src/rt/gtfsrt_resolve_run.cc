@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <optional>
+#include <vector>
 
+#include "nigiri/loader/gtfs/stop_seq_number_encoding.h"
 #include "nigiri/common/day_list.h"
 #include "nigiri/common/split_duration.h"
 #include "nigiri/rt/rt_timetable.h"
@@ -58,40 +60,79 @@ void resolve_rt(rt_timetable const& rtt,
 
 namespace {
 
+// An update is only moved to another service day if none of its absolute
+// times is within 12h of the resolved run...
 constexpr auto const kMaxRtScheduleOffset = duration_t{12 * 60};
 
-std::optional<unixtime_t> first_rt_time(
-    transit_realtime::TripUpdate const& tu) {
-  for (auto const& stu : tu.stop_time_update()) {
-    for (auto const* ev : {&stu.arrival(), &stu.departure()}) {
-      if (ev->has_time()) {
-        return std::chrono::time_point_cast<i32_minutes>(
-            date::sys_seconds{std::chrono::seconds{ev->time()}});
-      }
-    }
-  }
-  return std::nullopt;
-}
+// ... and its times are a whole number of days away from the run, give or
+// take this much (realtime delay plus a DST hour). Everything else is a late
+// or early vehicle and stays on the resolved run.
+constexpr auto const kMaxShiftedDelay = duration_t{3 * 60};
 
-// Signed offset from the scheduled time of the run closest to `rt_time`.
-duration_t closest_offset(timetable const& tt,
-                          run const& r,
-                          unixtime_t const rt_time) {
-  auto best = std::optional<duration_t>{};
-  for (auto i = r.stop_range_.from_; i != r.stop_range_.to_; ++i) {
-    for (auto const ev : {event_type::kArr, event_type::kDep}) {
-      if ((ev == event_type::kArr && i == r.stop_range_.from_) ||
-          (ev == event_type::kDep && i == r.stop_range_.to_ - 1U)) {
+constexpr auto const kDay = duration_t{1440};
+
+// An absolute realtime time, matched to a stop of the resolved run.
+struct rt_event {
+  stop_idx_t rel_stop_;  // relative to the run's stop range
+  event_type ev_;
+  unixtime_t time_;
+};
+
+std::vector<rt_event> match_rt_events(timetable const& tt,
+                                      run const& r,
+                                      trip_idx_t const trip,
+                                      transit_realtime::TripUpdate const& tu) {
+  auto const n_stops = static_cast<stop_idx_t>(r.stop_range_.size());
+  auto const location_seq =
+      tt.route_location_seq_[tt.transport_route_[r.t_.t_idx_]];
+  auto seq_numbers = std::vector<stop_idx_t>{};
+  for (auto const seq : loader::gtfs::stop_seq_number_range{
+           {tt.trip_stop_seq_numbers_[trip]}, n_stops}) {
+    seq_numbers.push_back(seq);
+  }
+
+  auto events = std::vector<rt_event>{};
+  auto next_rel = stop_idx_t{0U};
+  for (auto const& stu : tu.stop_time_update()) {
+    if (stu.schedule_relationship() ==
+        transit_realtime::
+            TripUpdate_StopTimeUpdate_ScheduleRelationship_SKIPPED) {
+      continue;
+    }
+    for (auto rel = next_rel; rel < n_stops; ++rel) {
+      auto const loc =
+          stop{location_seq[r.stop_range_.from_ + rel]}.location_idx();
+      auto const matches =
+          (stu.has_stop_sequence() && rel < seq_numbers.size() &&
+           stu.stop_sequence() == seq_numbers[rel]) ||
+          (stu.has_stop_id() &&
+           stu.stop_id() == tt.locations_.ids_[loc].view());
+      if (!matches) {
         continue;
       }
-      auto const offset = rt_time - tt.event_time(r.t_, i, ev);
-      if (!best.has_value() ||
-          std::chrono::abs(offset) < std::chrono::abs(*best)) {
-        best = offset;
+      if (rel != 0U && stu.arrival().has_time()) {
+        events.push_back(
+            {rel, event_type::kArr,
+             std::chrono::time_point_cast<i32_minutes>(date::sys_seconds{
+                 std::chrono::seconds{stu.arrival().time()}})});
       }
+      if (rel != n_stops - 1U && stu.departure().has_time()) {
+        events.push_back(
+            {rel, event_type::kDep,
+             std::chrono::time_point_cast<i32_minutes>(date::sys_seconds{
+                 std::chrono::seconds{stu.departure().time()}})});
+      }
+      next_rel = static_cast<stop_idx_t>(rel + 1U);
+      break;
     }
   }
-  return best.value_or(duration_t{0});
+  return events;
+}
+
+duration_t shift_residual(duration_t const offset) {
+  auto const days = static_cast<std::int64_t>(
+      std::floor(static_cast<double>(offset.count()) / 1440.0 + 0.5));
+  return offset - days * kDay;
 }
 
 bool is_active(timetable const& tt,
@@ -102,6 +143,9 @@ bool is_active(timetable const& tt,
              static_cast<std::size_t>(day));
 }
 
+// Same stops and the same scheduled times relative to the first departure.
+// Relative times stay equal across DST changes, unlike the UTC-based
+// minutes after midnight.
 bool same_schedule(timetable const& tt,
                    transport_idx_t const a,
                    interval<stop_idx_t> const a_range,
@@ -112,6 +156,8 @@ bool same_schedule(timetable const& tt,
   }
   auto const a_seq = tt.route_location_seq_[tt.transport_route_[a]];
   auto const b_seq = tt.route_location_seq_[tt.transport_route_[b]];
+  auto const a_first = tt.event_mam(a, a_range.from_, event_type::kDep).count();
+  auto const b_first = tt.event_mam(b, b_range.from_, event_type::kDep).count();
   for (auto i = stop_idx_t{0U}; i != a_range.size(); ++i) {
     auto const ai = static_cast<stop_idx_t>(a_range.from_ + i);
     auto const bi = static_cast<stop_idx_t>(b_range.from_ + i);
@@ -123,12 +169,30 @@ bool same_schedule(timetable const& tt,
           (ev == event_type::kDep && i == a_range.size() - 1U)) {
         continue;
       }
-      if (tt.event_mam(a, ai, ev).count() != tt.event_mam(b, bi, ev).count()) {
+      if (tt.event_mam(a, ai, ev).count() - a_first !=
+          tt.event_mam(b, bi, ev).count() - b_first) {
         return false;
       }
     }
   }
   return true;
+}
+
+// Largest absolute difference between the realtime events and the run.
+duration_t max_offset(timetable const& tt,
+                      run const& r,
+                      std::vector<rt_event> const& events) {
+  auto worst = duration_t{0};
+  for (auto const& e : events) {
+    auto const offset =
+        e.time_ -
+        tt.event_time(
+            r.t_, static_cast<stop_idx_t>(r.stop_range_.from_ + e.rel_stop_),
+            e.ev_);
+    worst = std::max(worst, std::chrono::duration_cast<duration_t>(
+                                std::chrono::abs(offset)));
+  }
+  return worst;
 }
 
 }  // namespace
@@ -139,47 +203,68 @@ std::optional<std::pair<run, trip_idx_t>> align_run_to_rt_times(
     run const& r,
     trip_idx_t const trip,
     transit_realtime::TripUpdate const& tu) {
-  auto const rt_time = first_rt_time(tu);
-  if (!rt_time.has_value()) {
+  auto const events = match_rt_events(tt, r, trip, tu);
+  if (events.empty()) {
     return std::pair{r, trip};
   }
 
-  auto const offset = closest_offset(tt, r, *rt_time);
-  if (std::chrono::abs(offset) < kMaxRtScheduleOffset) {
-    return std::pair{r, trip};
+  // Keep the run unless every realtime time is far from its stop and all of
+  // them are a whole number of days off.
+  for (auto const& e : events) {
+    auto const offset =
+        e.time_ -
+        tt.event_time(
+            r.t_, static_cast<stop_idx_t>(r.stop_range_.from_ + e.rel_stop_),
+            e.ev_);
+    if (std::chrono::abs(offset) < kMaxRtScheduleOffset ||
+        std::chrono::abs(shift_residual(offset)) > kMaxShiftedDelay) {
+      return std::pair{r, trip};
+    }
   }
 
-  auto const day_shift = static_cast<std::int64_t>(
-      std::floor(static_cast<double>(offset.count()) / 1440.0 + 0.5));
-  auto const day = static_cast<std::int64_t>(to_idx(r.t_.day_)) + day_shift;
-  auto const make_run = [&](transport_idx_t const t,
-                            interval<stop_idx_t> const stop_range) {
-    return run{
-        .t_ = transport{t, day_idx_t{static_cast<day_idx_t::value_t>(day)}},
-        .stop_range_ = stop_range};
+  // Candidates: all transports of this trip (including other DST variants)
+  // and of its twins on the same route and direction. Pick the run on the
+  // day the realtime times imply that fits them best.
+  auto best = std::optional<std::pair<run, trip_idx_t>>{};
+  auto best_offset = kMaxShiftedDelay;
+  auto const try_trip = [&](trip_idx_t const candidate) {
+    for (auto const [t, stop_range] : tt.trip_transport_ranges_[candidate]) {
+      if (!same_schedule(tt, r.t_.t_idx_, r.stop_range_, t, stop_range)) {
+        continue;
+      }
+      auto const& ref = events.front();
+      auto const ref_idx =
+          static_cast<stop_idx_t>(stop_range.from_ + ref.rel_stop_);
+      auto const day0 =
+          tt.event_time(transport{t, day_idx_t{0U}}, ref_idx, ref.ev_);
+      auto const offset = ref.time_ - day0;
+      auto const day = static_cast<std::int64_t>(
+          std::floor(static_cast<double>(offset.count()) / 1440.0 + 0.5));
+      if (!is_active(tt, t, day)) {
+        continue;
+      }
+      auto const cand = run{
+          .t_ = transport{t, day_idx_t{static_cast<day_idx_t::value_t>(day)}},
+          .stop_range_ = stop_range};
+      auto const off = max_offset(tt, cand, events);
+      if (off < best_offset || (off == best_offset && !best.has_value())) {
+        best = std::pair{cand, candidate};
+        best_offset = off;
+      }
+    }
   };
 
-  if (is_active(tt, r.t_.t_idx_, day)) {
-    return std::pair{make_run(r.t_.t_idx_, r.stop_range_), trip};
-  }
-
+  try_trip(trip);
   auto const route = tt.trip_route_id_[trip];
-  if (route == route_id_idx_t::invalid()) {
-    return std::nullopt;
-  }
-  auto const direction = tt.trip_direction_id_.test(trip);
-  for (auto const twin : tt.route_ids_[src].route_id_trips_[route]) {
-    if (twin == trip || tt.trip_direction_id_.test(twin) != direction) {
-      continue;
-    }
-    for (auto const [t, stop_range] : tt.trip_transport_ranges_[twin]) {
-      if (is_active(tt, t, day) &&
-          same_schedule(tt, r.t_.t_idx_, r.stop_range_, t, stop_range)) {
-        return std::pair{make_run(t, stop_range), twin};
+  if (route != route_id_idx_t::invalid()) {
+    auto const direction = tt.trip_direction_id_.test(trip);
+    for (auto const twin : tt.route_ids_[src].route_id_trips_[route]) {
+      if (twin != trip && tt.trip_direction_id_.test(twin) == direction) {
+        try_trip(twin);
       }
     }
   }
-  return std::nullopt;
+  return best;
 }
 
 std::pair<run, trip_idx_t> gtfsrt_resolve_run(
