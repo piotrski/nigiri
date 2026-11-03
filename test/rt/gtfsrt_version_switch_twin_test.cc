@@ -497,3 +497,31 @@ TEST(rt, gtfsrt_version_switch_twin_skipped_loop_stop) {
   EXPECT_EQ(old.t_, aligned->first.t_);
   EXPECT_EQ(old_trip, aligned->second);
 }
+
+// End to end on a loop: the update for the second visit of A (stop_sequence 3)
+// must not be applied at the first visit of A.
+TEST(rt, gtfsrt_version_switch_twin_loop_end_to_end) {
+  auto tt = load_variant(loop_files(), sys_days{2019_y / May / 1},
+                         sys_days{2019_y / May / 10});
+  auto [old, old_trip] =
+      resolve(tt, sys_days{2019_y / May / 4}, "OLD_601", "20190503");
+  auto rtt = create_rt_timetable(tt, sys_days{2019_y / May / 4});
+  auto tu = trip_update(
+      "NEW_601", "A", event_type::kArr,
+      tt.event_time(old.t_, old.stop_range_.to_ - 1U, event_type::kArr) + 2min);
+  tu.mutable_stop_time_update(0)->set_stop_sequence(3);
+  auto msg = transit_realtime::FeedMessage{};
+  msg.mutable_header()->set_gtfs_realtime_version("2.0");
+  msg.mutable_header()->set_timestamp(1556928300);
+  auto* entity = msg.add_entity();
+  entity->set_id("loop");
+  *entity->mutable_trip_update() = tu;
+  auto const stats =
+      gtfsrt_update_buf(tt, rtt, source_idx_t{0}, "", msg.SerializeAsString());
+  EXPECT_EQ(1, stats.total_entities_success_);
+  auto f = get_run(tt, rtt, "OLD_601", "20190503");
+  ASSERT_TRUE(f.has_value());
+  ASSERT_TRUE(f->is_rt());
+  EXPECT_EQ(0min, (*f)[0].delay(event_type::kDep));
+  EXPECT_EQ(2min, (*f)[2].delay(event_type::kArr));
+}
