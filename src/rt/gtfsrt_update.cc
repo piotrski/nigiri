@@ -852,8 +852,25 @@ statistics gtfsrt_update_msg(timetable const& tt,
               : std::string_view{};
 
       auto is_resolved_static = false;
-      resolve_static(today, tt, src, td, [&](run r, trip_idx_t const trip) {
+      resolve_static(today, tt, src, td, [&](run r, trip_idx_t trip) {
         is_resolved_static = true;
+
+        if (!td.has_start_date() &&
+            sr != gtfsrt::TripDescriptor_ScheduleRelationship_CANCELED) {
+          auto const aligned =
+              align_run_to_rt_times(tt, src, r, trip, entity.trip_update());
+          if (!aligned.has_value()) {
+            log(log_lvl::debug, "rt.gtfs.resolve",
+                "realtime times are a day away from the resolved run and "
+                "there is no matching run on that day, skipping (tag={}) {}",
+                tag, remove_nl(td.DebugString()));
+            span->AddEvent(
+                "rt times far from schedule",
+                {{"entity.id", entity.id()}, {"trip.trip_id", td.trip_id()}});
+            return utl::continue_t::kContinue;
+          }
+          std::tie(r, trip) = *aligned;
+        }
 
         resolve_rt(rtt, r, trip_id, src);
 
