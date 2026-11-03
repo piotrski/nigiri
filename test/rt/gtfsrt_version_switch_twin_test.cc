@@ -300,3 +300,200 @@ TEST(rt, gtfsrt_version_switch_twin_long_trip) {
   EXPECT_EQ(old.t_, aligned->first.t_);
   EXPECT_EQ(old_trip, aligned->second);
 }
+
+namespace {
+
+mem_dir neighboring_files() {
+  return mem_dir::read(R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+MPK,MPK,https://example.com,Europe/Warsaw
+
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+A,A,50.0,19.0
+B,B,50.1,19.1
+C,C,50.2,19.2
+
+# routes.txt
+route_id,agency_id,route_short_name,route_long_name,route_type
+601,MPK,601,,3
+602,MPK,602,,3
+
+# calendar_dates.txt
+service_id,date,exception_type
+OLD,20190503,1
+NEW,20190504,1
+NEW,20190505,1
+
+# trips.txt
+route_id,service_id,trip_id,direction_id
+601,OLD,OLD_601,1
+601,OLD,LATER_601,1
+601,NEW,NEW_601,1
+602,NEW,NEW_602,0
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+OLD_601,26:10:00,26:10:00,A,1
+OLD_601,26:40:00,26:40:00,B,2
+LATER_601,26:12:00,26:12:00,A,1
+LATER_601,26:42:00,26:42:00,B,2
+NEW_601,26:10:00,26:10:00,A,1
+NEW_601,26:40:00,26:40:00,B,2
+NEW_602,26:20:00,26:20:00,B,1
+NEW_602,26:50:00,26:50:00,C,2
+)");
+}
+
+}  // namespace
+
+// A departure two minutes after the twin is a different trip.
+TEST(rt, gtfsrt_version_switch_twin_neighboring_departure) {
+  auto const tt = load_variant(neighboring_files(), sys_days{2019_y / May / 1},
+                               sys_days{2019_y / May / 10});
+  auto const [old, old_trip] =
+      resolve(tt, sys_days{2019_y / May / 4}, "OLD_601", "20190503");
+  auto const [r, trip] =
+      resolve(tt, sys_days{2019_y / May / 4}, "NEW_601", "20190504");
+  auto tu = trip_update(
+      "NEW_601", "A", event_type::kDep,
+      tt.event_time(old.t_, old.stop_range_.from_, event_type::kDep) + 2min);
+  auto aligned = align_run_to_rt_times(tt, source_idx_t{0}, r, trip, tu);
+  ASSERT_TRUE(aligned.has_value());
+  EXPECT_EQ(old_trip, aligned->second);
+}
+
+namespace {
+
+mem_dir renumbered_files() {
+  return mem_dir::read(R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+MPK,MPK,https://example.com,Europe/Warsaw
+
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+A,A,50.0,19.0
+B,B,50.1,19.1
+C,C,50.2,19.2
+
+# routes.txt
+route_id,agency_id,route_short_name,route_long_name,route_type
+601,MPK,601,,3
+602,MPK,602,,3
+
+# calendar_dates.txt
+service_id,date,exception_type
+OLD,20190503,1
+NEW,20190504,1
+NEW,20190505,1
+
+# trips.txt
+route_id,service_id,trip_id,direction_id
+601,OLD,OLD_601,1
+601,NEW,NEW_601,1
+602,NEW,NEW_602,0
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+OLD_601,26:10:00,26:10:00,A,1
+OLD_601,26:40:00,26:40:00,B,2
+NEW_601,26:10:00,26:10:00,A,10
+NEW_601,26:40:00,26:40:00,B,20
+NEW_602,26:20:00,26:20:00,B,1
+NEW_602,26:50:00,26:50:00,C,2
+)");
+}
+
+}  // namespace
+
+// stop_sequence values of the new trip are translated to the twin's.
+TEST(rt, gtfsrt_version_switch_twin_renumbered_stops) {
+  auto tt = load_variant(renumbered_files(), sys_days{2019_y / May / 1},
+                         sys_days{2019_y / May / 10});
+  auto rtt = create_rt_timetable(tt, sys_days{2019_y / May / 4});
+  auto msg = std::string{kTripUpdate};
+  auto pos = msg.find("\"stopId\": \"A\"");
+  msg.replace(pos, std::string{"\"stopId\": \"A\""}.size(),
+              "\"stopSequence\": 10");
+  pos = msg.find("\"stopId\": \"B\"");
+  msg.replace(pos, std::string{"\"stopId\": \"B\""}.size(),
+              "\"stopSequence\": 20");
+  gtfsrt_update_buf(tt, rtt, source_idx_t{0}, "", json_to_protobuf(msg));
+  auto old = get_run(tt, rtt, "OLD_601", "20190503");
+  ASSERT_TRUE(old.has_value());
+  ASSERT_TRUE(old->is_rt());
+  EXPECT_EQ(2min, (*old)[0].delay(event_type::kDep));
+}
+
+namespace {
+
+mem_dir loop_files() {
+  return mem_dir::read(R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+MPK,MPK,https://example.com,Europe/Warsaw
+
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+A,A,50.0,19.0
+B,B,50.1,19.1
+C,C,50.2,19.2
+
+# routes.txt
+route_id,agency_id,route_short_name,route_long_name,route_type
+601,MPK,601,,3
+602,MPK,602,,3
+
+# calendar_dates.txt
+service_id,date,exception_type
+OLD,20190503,1
+NEW,20190504,1
+NEW,20190505,1
+
+# trips.txt
+route_id,service_id,trip_id,direction_id
+601,OLD,OLD_601,1
+601,NEW,NEW_601,1
+602,NEW,NEW_602,0
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+OLD_601,26:10:00,26:10:00,A,1
+OLD_601,26:40:00,26:40:00,B,2
+OLD_601,27:10:00,27:10:00,A,3
+NEW_601,26:10:00,26:10:00,A,1
+NEW_601,26:40:00,26:40:00,B,2
+NEW_601,27:10:00,27:10:00,A,3
+NEW_602,26:20:00,26:20:00,B,1
+NEW_602,26:50:00,26:50:00,C,2
+)");
+}
+
+}  // namespace
+
+// A skipped stop advances matching, and stop_sequence tells apart the two
+// visits of a loop.
+TEST(rt, gtfsrt_version_switch_twin_skipped_loop_stop) {
+  auto tt = load_variant(loop_files(), sys_days{2019_y / May / 1},
+                         sys_days{2019_y / May / 10});
+  auto [old, old_trip] =
+      resolve(tt, sys_days{2019_y / May / 4}, "OLD_601", "20190503");
+  auto [r, trip] =
+      resolve(tt, sys_days{2019_y / May / 4}, "NEW_601", "20190504");
+  auto tu = trip_update(
+      "NEW_601", "A", event_type::kArr,
+      tt.event_time(old.t_, old.stop_range_.to_ - 1U, event_type::kArr) + 2min);
+  tu.mutable_stop_time_update(0)->set_stop_sequence(3);
+  auto* skip = tu.add_stop_time_update();
+  skip->set_stop_id("A");
+  skip->set_stop_sequence(1);
+  skip->set_schedule_relationship(
+      transit_realtime::TripUpdate_StopTimeUpdate_ScheduleRelationship_SKIPPED);
+  tu.mutable_stop_time_update()->SwapElements(0, 1);
+  auto aligned = align_run_to_rt_times(tt, source_idx_t{0}, r, trip, tu);
+  ASSERT_TRUE(aligned.has_value());
+  EXPECT_EQ(old.t_, aligned->first.t_);
+  EXPECT_EQ(old_trip, aligned->second);
+}

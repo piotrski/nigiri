@@ -178,6 +178,15 @@ void resolve_static(date::sys_days const today,
   }
 }
 
+// After align_run_to_rt_times() switched to a twin trip: rewrite the
+// stop_sequence values of the update from `from`'s numbering to `to`'s, by
+// stop position (twins have the same stops).
+void translate_stop_sequences(timetable const&,
+                              trip_idx_t from,
+                              trip_idx_t to,
+                              stop_idx_t n_stops,
+                              transit_realtime::TripUpdate&);
+
 std::pair<run, trip_idx_t> gtfsrt_resolve_run(
     date::sys_days const today,
     timetable const&,
@@ -187,7 +196,8 @@ std::pair<run, trip_idx_t> gtfsrt_resolve_run(
     std::string_view rt_changed_trip_id = {});
 
 // For a TripUpdate without start_date: if every absolute time of the update
-// is at least 12h from its stop's scheduled time in the resolved run, and all
+// is at least 12h from its stop's scheduled time in the resolved run (stops
+// matched by stop_sequence, else stop_id, skipped stops only advance), and all
 // of them are a whole number of days off (within 3h), the trip_id was resolved
 // to the wrong service day. Some feeds (e.g. ZTP Kraków on timetable version
 // switches) label tonight's post-midnight trips with the trip_id of the next
@@ -196,8 +206,8 @@ std::pair<run, trip_idx_t> gtfsrt_resolve_run(
 //
 // Returns the run the update belongs to: the same trip (any of its transports)
 // on the service day the realtime times imply, or else a "twin" trip of the
-// same route and direction with identical stops and relative scheduled times
-// on that day. Returns std::nullopt if there is no such run, so the update can
+// same route and direction with identical stops, relative scheduled times
+// and local departure time on that day. Returns std::nullopt if there is no such run, so the update can
 // be dropped instead of applying a delay of about a day.
 std::optional<std::pair<run, trip_idx_t>> align_run_to_rt_times(
     timetable const&,
