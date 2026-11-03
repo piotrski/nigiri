@@ -186,6 +186,24 @@ std::pair<run, trip_idx_t> gtfsrt_resolve_run(
     transit_realtime::TripDescriptor const&,
     std::string_view rt_changed_trip_id = {});
 
+// For a TripUpdate without start_date: if the absolute times of the update
+// are at least 12h away from every scheduled time of the resolved run, the
+// trip_id was resolved to the wrong service day. Some feeds (e.g. ZTP Kraków
+// on timetable version switches) label tonight's post-midnight trips with the
+// trip_id of the next version, which only runs from the next service day on.
+//
+// Returns the run the update belongs to: the same trip on the service day the
+// realtime times imply, or else a "twin" trip of the same route and direction
+// with identical stops and scheduled times on that day. Returns std::nullopt
+// if there is no such run, so the update can be dropped instead of applying a
+// delay of about a day.
+std::optional<std::pair<run, trip_idx_t>> align_run_to_rt_times(
+    timetable const&,
+    source_idx_t,
+    run const&,
+    trip_idx_t,
+    transit_realtime::TripUpdate const&);
+
 void resolve_rt(rt_timetable const&,
                 run&,
                 std::string_view trip_id,
