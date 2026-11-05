@@ -135,17 +135,15 @@ TEST(rt, gtfsrt_resolve_static_trip) {
 }
 
 TEST(rt, gtfsrt_resolve_adjacent_service_day) {
-  auto tt = timetable{};
-  tt.date_range_ = {date::sys_days{2019_y / March / 25},
-                    date::sys_days{2019_y / November / 1}};
-  load_timetable({}, source_idx_t{0}, test_files(), tt);
+  auto const tt =
+      loader::load(test_files(), {2019_y / March / 25, 2019_y / November / 1});
 
   {
     auto td = transit_realtime::TripDescriptor();
     td.set_trip_id("T_RE1");
 
-    auto const [r, t] = rt::gtfsrt_resolve_run(date::sys_days{2019_y / May / 4},
-                                               tt, nullptr, source_idx_t{0}, td);
+    auto const [r, t] = rt::gtfsrt_resolve_run(
+        date::sys_days{2019_y / May / 4}, tt, nullptr, source_idx_t{0}, td);
     ASSERT_TRUE(r.valid());
     EXPECT_EQ(date::sys_days{2019_y / May / 4},
               tt.internal_interval_days().from_ + to_idx(r.t_.day_) * 1_days);
@@ -155,8 +153,8 @@ TEST(rt, gtfsrt_resolve_adjacent_service_day) {
     auto td = transit_realtime::TripDescriptor();
     td.set_trip_id("T_RE2");
 
-    auto const [r, t] = rt::gtfsrt_resolve_run(date::sys_days{2019_y / May / 5},
-                                               tt, nullptr, source_idx_t{0}, td);
+    auto const [r, t] = rt::gtfsrt_resolve_run(
+        date::sys_days{2019_y / May / 5}, tt, nullptr, source_idx_t{0}, td);
     EXPECT_FALSE(r.valid());
   }
 }

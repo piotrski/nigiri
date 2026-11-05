@@ -1,7 +1,6 @@
 #include "gtest/gtest.h"
 
-#include "nigiri/loader/gtfs/load_timetable.h"
-#include "nigiri/loader/init_finish.h"
+#include "nigiri/loader/load.h"
 #include "nigiri/rt/create_rt_timetable.h"
 #include "nigiri/rt/frun.h"
 #include "nigiri/rt/gtfsrt_resolve_run.h"
@@ -117,12 +116,9 @@ std::optional<frun> get_run(timetable const& tt,
 }  // namespace
 
 TEST(rt, gtfsrt_version_switch_twin) {
-  auto tt = timetable{};
-  register_special_stations(tt);
-  tt.date_range_ = {date::sys_days{2019_y / May / 1},
-                    date::sys_days{2019_y / May / 10}};
-  load_timetable({}, source_idx_t{0}, twin_files(), tt);
-  finalize(tt);
+  auto const tt = loader::load(
+      twin_files(),
+      {date::sys_days{2019_y / May / 1}, date::sys_days{2019_y / May / 10}});
 
   auto rtt = create_rt_timetable(tt, date::sys_days{2019_y / May / 4});
   auto const stats = gtfsrt_update_buf(tt, rtt, source_idx_t{0}, "",
@@ -203,12 +199,7 @@ NEW_601,{},{},B,2
 timetable load_variant(mem_dir const& files,
                        date::sys_days const from,
                        date::sys_days const to) {
-  auto tt = timetable{};
-  register_special_stations(tt);
-  tt.date_range_ = {from, to};
-  load_timetable({}, source_idx_t{0}, files, tt);
-  finalize(tt);
-  return tt;
+  return loader::load(files, {from, to});
 }
 
 std::pair<run, trip_idx_t> resolve(timetable const& tt,

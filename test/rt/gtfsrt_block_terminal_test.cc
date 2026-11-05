@@ -4,8 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "nigiri/loader/gtfs/load_timetable.h"
-#include "nigiri/loader/init_finish.h"
+#include "nigiri/loader/load.h"
 #include "nigiri/rt/create_rt_timetable.h"
 #include "nigiri/rt/frun.h"
 #include "nigiri/rt/gtfsrt_resolve_run.h"
@@ -134,12 +133,9 @@ transit_realtime::FeedMessage to_msg(std::vector<trip_update> const& updates) {
 }
 
 timetable load_block_timetable() {
-  auto tt = timetable{};
-  tt.date_range_ = {date::sys_days{2026_y / October / 25},
-                    date::sys_days{2026_y / November / 5}};
-  load_timetable({}, source_idx_t{0}, mem_dir::read(kTimetable), tt);
-  finalize(tt);
-  return tt;
+  return loader::load(mem_dir::read(kTimetable),
+                      {date::sys_days{2026_y / October / 25},
+                       date::sys_days{2026_y / November / 5}});
 }
 
 rt::run resolve(timetable const& tt,
