@@ -166,18 +166,20 @@ struct rt_timetable {
   std::variant<translation_idx_t, std::string_view> trip_short_name(
       timetable const& tt, rt_transport_idx_t const t) const {
     if (rt_transport_trip_short_names_[t].empty()) {
+      auto const static_display_name = [&](transport const x)
+          -> std::variant<translation_idx_t, std::string_view> {
+        auto const trip_idx =
+            tt.merged_trips_[tt.transport_to_trip_section_[x.t_idx_].front()]
+                .front();
+        return tt.trip_display_names_[trip_idx];
+      };
       return rt_transport_static_transport_[t].apply(utl::overloaded{
-          [&](transport const x)
-              -> std::variant<translation_idx_t, std::string_view> {
-            auto const trip_idx =
-                tt.merged_trips_[tt.transport_to_trip_section_[x.t_idx_]
-                                     .front()]
-                    .front();
-            return tt.trip_display_names_[trip_idx];
-          },
+          static_display_name,
           [&](rt_add_trip_id_idx_t)
               -> std::variant<translation_idx_t, std::string_view> {
-            return std::string_view{"?"};
+            auto const dup = duplicated_from(t);
+            return dup.is_valid() ? static_display_name(dup)
+                                  : std::string_view{"?"};
           }});
     } else {
       return rt_transport_trip_short_names_[t].view();
@@ -204,6 +206,13 @@ struct rt_timetable {
   transport resolve_static(rt_transport_idx_t const rt_t) const noexcept {
     auto const t = rt_transport_static_transport_[rt_t];
     return holds_alternative<transport>(t) ? t.as<transport>() : transport{};
+  }
+
+  // Static transport whose schedule a GTFS-RT DUPLICATED trip copies, or an
+  // invalid transport if `rt_t` is not such a copy.
+  transport duplicated_from(rt_transport_idx_t const rt_t) const noexcept {
+    auto const it = duplicated_static_transport_.find(rt_t);
+    return it == end(duplicated_static_transport_) ? transport{} : it->second;
   }
 
   rt_transport_idx_t resolve_rt(transport const t) const noexcept {
@@ -265,6 +274,12 @@ struct rt_timetable {
   // RT transport -> static transport (not for additional trips)
   vector_map<rt_transport_idx_t, variant<transport, rt_add_trip_id_idx_t>>
       rt_transport_static_transport_;
+
+  // Additional trip (DUPLICATED copy) -> static transport it duplicates.
+  // A copy is an additional trip with its own trip id, so it never takes the
+  // static transport's slot in static_trip_lookup_. Its scheduled times are
+  // the static transport's.
+  hash_map<rt_transport_idx_t, transport> duplicated_static_transport_;
 
   struct additional_trips {
     string_store<rt_add_trip_id_idx_t> ids_;

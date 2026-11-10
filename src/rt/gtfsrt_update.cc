@@ -828,11 +828,27 @@ statistics gtfsrt_update_msg(timetable const& tt,
       continue;
     }
 
+    // DUPLICATED copies are only supported on the original's own run: a
+    // trip_properties start_date/start_time (a run shifted in time) is not.
+    auto const duplicated =
+        sr == gtfsrt::TripDescriptor_ScheduleRelationship_DUPLICATED;
+    if (duplicated &&
+        (entity.trip_update().trip_properties().has_start_date() ||
+         entity.trip_update().trip_properties().has_start_time())) {
+      log(log_lvl::debug, "rt.gtfs.unsupported",
+          "unsupported: DUPLICATED with a shifted start_date/start_time "
+          "(tag={}, id={}), skipping message",
+          tag, entity.id());
+      ++stats.unsupported_schedule_relationship_;
+      continue;
+    }
+
     auto const added = is_added(sr);
     // auto const added_with_ref = is_added_with_ref(sr);
 
     if (sr != gtfsrt::TripDescriptor_ScheduleRelationship_SCHEDULED &&
-        sr != gtfsrt::TripDescriptor_ScheduleRelationship_CANCELED && !added) {
+        sr != gtfsrt::TripDescriptor_ScheduleRelationship_CANCELED && !added &&
+        !duplicated) {
       log(log_lvl::debug, "rt.gtfs.unsupported",
           "unsupported schedule relationship {} (tag={}, id={}), skipping "
           "message",
@@ -878,6 +894,21 @@ statistics gtfsrt_update_msg(timetable const& tt,
                 static_cast<stop_idx_t>(r.stop_range_.size()), *translated);
           }
           std::tie(r, trip) = *aligned;
+        }
+
+        if (duplicated) {
+          // A copy of the run with its own trip id: never the static run's
+          // realtime transport, which belongs to the SCHEDULED update.
+          auto const copy = rtt.additional_trips_.at(src).ids_.find(trip_id);
+          r.rt_ = copy.has_value()
+                      ? rtt.additional_trips_.at(src).transports_[*copy]
+                      : rt_transport_idx_t::invalid();
+          if (update_run(src, tt, rtt, trip, r,
+                         translated.has_value() ? *translated
+                                                : entity.trip_update())) {
+            ++stats.total_entities_success_;
+          }
+          return utl::continue_t::kBreak;
         }
 
         resolve_rt(rtt, r, trip_id, src);
