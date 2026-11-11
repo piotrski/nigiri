@@ -39,6 +39,14 @@ using change_callback_t =
                        std::optional<bool> const in_out_allowed,
                        std::optional<duration_t> const delay)>;
 
+// Static trip a GTFS-RT DUPLICATED copy runs: stop i of the copy is stop
+// `from_ + i` of the static transport `t_`.
+struct duplicated_trip {
+  transport t_;
+  stop_idx_t from_;
+  trip_idx_t trip_;
+};
+
 // General note:
 // - To deactivate bits for static transports that are updated with delays,
 //   rerouting (incl. track changes) or cancellations (without changing the
@@ -177,6 +185,10 @@ struct rt_timetable {
           },
           [&](rt_add_trip_id_idx_t)
               -> std::variant<translation_idx_t, std::string_view> {
+            auto const* const dup = duplicated_from(t);
+            if (dup != nullptr) {
+              return tt.trip_display_names_[dup->trip_];
+            }
             return std::string_view{"?"};
           }});
     } else {
@@ -204,6 +216,14 @@ struct rt_timetable {
   transport resolve_static(rt_transport_idx_t const rt_t) const noexcept {
     auto const t = rt_transport_static_transport_[rt_t];
     return holds_alternative<transport>(t) ? t.as<transport>() : transport{};
+  }
+
+  // The static trip a GTFS-RT DUPLICATED copy runs, or nullptr if `rt_t` is
+  // not such a copy.
+  duplicated_trip const* duplicated_from(
+      rt_transport_idx_t const rt_t) const noexcept {
+    auto const it = duplicated_trips_.find(rt_t);
+    return it == end(duplicated_trips_) ? nullptr : &it->second;
   }
 
   rt_transport_idx_t resolve_rt(transport const t) const noexcept {
@@ -265,6 +285,12 @@ struct rt_timetable {
   // RT transport -> static transport (not for additional trips)
   vector_map<rt_transport_idx_t, variant<transport, rt_add_trip_id_idx_t>>
       rt_transport_static_transport_;
+
+  // Additional trip (DUPLICATED copy) -> static trip it runs. A copy is an
+  // additional trip with its own trip id and only the trip's stops, so it
+  // never takes the static transport's slot in static_trip_lookup_. Its
+  // scheduled times are the static trip's.
+  hash_map<rt_transport_idx_t, duplicated_trip> duplicated_trips_;
 
   struct additional_trips {
     string_store<rt_add_trip_id_idx_t> ids_;

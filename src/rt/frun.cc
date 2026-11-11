@@ -208,9 +208,15 @@ run_stop run_stop::get_last_trip_stop(event_type const ev_type) const {
 
 unixtime_t run_stop::scheduled_time(event_type const ev_type) const {
   assert(fr_->size() > stop_idx_);
-  return fr_->is_scheduled()
-             ? tt().event_time(fr_->t_, stop_idx_, ev_type)
-             : rtt()->unix_event_time(fr_->rt_, stop_idx_, ev_type);
+  if (fr_->is_scheduled()) {
+    return tt().event_time(fr_->t_, stop_idx_, ev_type);
+  }
+  if (auto const* const dup = rtt()->duplicated_from(fr_->rt_);
+      dup != nullptr) {
+    return tt().event_time(
+        dup->t_, static_cast<stop_idx_t>(dup->from_ + stop_idx_), ev_type);
+  }
+  return rtt()->unix_event_time(fr_->rt_, stop_idx_, ev_type);
 }
 
 unixtime_t run_stop::time(event_type const ev_type) const {
@@ -367,6 +373,10 @@ std::string_view run_stop::trip_short_name(event_type const ev_type,
                                            lang_t const& lang) const {
   if (fr_->is_scheduled()) {
     return tt().translate(lang, tt().trip_short_names_[get_trip_idx(ev_type)]);
+  } else if (auto const* const dup = rtt()->duplicated_from(fr_->rt_);
+             dup != nullptr) {
+    // A GTFS-RT DUPLICATED copy runs the static trip it copies.
+    return tt().translate(lang, tt().trip_short_names_[dup->trip_]);
   } else {
     return utl::visit(
         rtt()->trip_short_name(tt(), fr_->rt_),
