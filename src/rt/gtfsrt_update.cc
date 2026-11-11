@@ -712,10 +712,13 @@ void handle_vehicle_position(timetable const& tt,
 // schedule, and never touches the static run's realtime transport, which
 // belongs to the SCHEDULED update.
 //
-// The copy is unscheduled, so update_run matches stop time updates by stop_id
-// and needs absolute times. Each stop time update is first matched against the
-// static trip (stop_sequence, else stop_id, moving forward), then given the
-// trip's stop_id and, for a delay, the static time plus the delay.
+// update_run treats the copy as an unscheduled run: it matches stop time
+// updates by stop_id only (the wrong stop on a loop) and propagates from the
+// previous prediction instead of the schedule. So each stop time update is
+// first matched to a stop of the static trip (stop_sequence, else stop_id,
+// moving forward). update_run then only gets one update per stop, in order,
+// for skipped stops and stop changes, and the times are set here against the
+// static schedule, the same way update_run does for a scheduled run.
 bool update_duplicated_run(source_idx_t const src,
                            timetable const& tt,
                            rt_timetable& rtt,
@@ -740,8 +743,10 @@ bool update_duplicated_run(source_idx_t const src,
                          ev);
   };
 
-  auto update = tu;
-  update.clear_stop_time_update();
+  // The stop time update of each stop of the trip. A later update for the
+  // same stop wins, like a SCHEDULED after a SKIPPED with the same sequence.
+  auto updates =
+      std::vector<gtfsrt::TripUpdate_StopTimeUpdate const*>(n_stops, nullptr);
   auto next = stop_idx_t{0U};
   for (auto const& stu : tu.stop_time_update()) {
     auto i = next;
@@ -755,33 +760,19 @@ bool update_duplicated_run(source_idx_t const src,
       continue;
     }
     next = i;
-    auto& out = *update.add_stop_time_update();
-    out = stu;
-    out.clear_stop_sequence();
-    if (!out.has_stop_id()) {
-      out.set_stop_id(std::string{stop_id(i)});
-    }
-    auto const to_absolute = [&](gtfsrt::TripUpdate_StopTimeEvent& ev,
-                                 event_type const type) {
-      if (!ev.has_time() && ev.has_delay()) {
-        ev.set_time(std::chrono::duration_cast<std::chrono::seconds>(
-                        static_time(i, type).time_since_epoch())
-                        .count() +
-                    ev.delay());
-      }
-    };
-    if (out.has_arrival()) {
-      to_absolute(*out.mutable_arrival(), event_type::kArr);
-    }
-    if (out.has_departure()) {
-      to_absolute(*out.mutable_departure(), event_type::kDep);
-    }
+    updates[i] = &stu;
   }
 
   auto copy = run{.stop_range_ = {stop_idx_t{0U}, n_stops}};
   auto const& added = rtt.additional_trips_.at(src);
   if (auto const idx = added.ids_.find(copy_trip_id); idx.has_value()) {
     copy.rt_ = added.transports_[*idx];
+    // Start from the static stops, so a skipped stop or stop change from an
+    // earlier update is undone if this update no longer has it.
+    auto stops = rtt.rt_transport_location_seq_[copy.rt_];
+    for (auto i = stop_idx_t{0U}; i != n_stops; ++i) {
+      stops[i] = location_seq[i];
+    }
   } else {
     auto stops =
         std::vector<stop::value_type>(begin(location_seq), end(location_seq));
@@ -809,7 +800,105 @@ bool update_duplicated_run(source_idx_t const src,
     rtt.duplicated_trips_.emplace(
         copy.rt_, duplicated_trip{r.t_, r.stop_range_.from_, trip});
   }
-  return update_run(src, tt, rtt, trip_idx_t::invalid(), copy, update);
+
+  // Stops: one update per stop, without times.
+  auto stops_update = tu;
+  stops_update.clear_stop_time_update();
+  for (auto i = stop_idx_t{0U}; i != n_stops; ++i) {
+    auto& out = *stops_update.add_stop_time_update();
+    if (updates[i] != nullptr) {
+      out = *updates[i];
+      out.clear_stop_sequence();
+      out.clear_arrival();
+      out.clear_departure();
+      if (out.schedule_relationship() ==
+          gtfsrt::TripUpdate_StopTimeUpdate_ScheduleRelationship_NO_DATA) {
+        out.clear_schedule_relationship();
+      }
+    }
+    if (!out.has_stop_id()) {
+      out.set_stop_id(std::string{stop_id(i)});
+    }
+  }
+  if (!update_run(src, tt, rtt, trip_idx_t::invalid(), copy, stops_update)) {
+    return false;
+  }
+
+  // Times, against the static schedule (see update_run).
+  auto const to_unix = [](std::int64_t const seconds) {
+    return unixtime_t{std::chrono::duration_cast<unixtime_t::duration>(
+        std::chrono::seconds{seconds})};
+  };
+  auto const to_duration = [](std::int64_t const seconds) {
+    return std::chrono::duration_cast<duration_t>(
+        std::chrono::seconds{seconds});
+  };
+  auto pred = std::optional<delay_propagation>{};
+  auto no_data = false;
+  auto prev = std::optional<unixtime_t>{};
+  auto const set = [&](stop_idx_t const i, event_type const ev,
+                       gtfsrt::TripUpdate_StopTimeEvent const* const update) {
+    auto const scheduled = static_time(i, ev);
+    auto time = rtt.unix_event_time(copy.rt_, i, ev);
+    auto state = rtt.data_state(copy.rt_, i, ev);
+    if (update != nullptr) {
+      time = update->has_time() ? to_unix(update->time())
+                                : scheduled + to_duration(update->delay());
+      state = rt_data_state::kPredicted;
+    } else if (pred.has_value()) {
+      time = scheduled + pred->pred_delay_;
+      state = rt_data_state::kPropagated;
+    } else if (no_data) {
+      time = scheduled;
+      state = rt_data_state::kNoRtData;
+    }
+    if (prev.has_value() && time < *prev) {
+      time = *prev;
+      state = rt_data_state::kInconsistent;
+    }
+    if (update != nullptr) {
+      pred = delay_propagation{
+          time, update->has_time()
+                    ? std::chrono::duration_cast<duration_t>(time - scheduled)
+                    : to_duration(update->delay())};
+    } else if (pred.has_value()) {
+      pred->pred_time_ = time;
+    }
+    rtt.update_time(copy.rt_, i, ev, time, state);
+    prev = time;
+  };
+  auto const has_time = [](gtfsrt::TripUpdate_StopTimeEvent const& ev) {
+    return ev.has_time() || ev.has_delay();
+  };
+  for (auto i = stop_idx_t{0U}; i != n_stops; ++i) {
+    auto const* stu = updates[i];
+    if (stu != nullptr &&
+        stu->schedule_relationship() ==
+            gtfsrt::TripUpdate_StopTimeUpdate_ScheduleRelationship_NO_DATA) {
+      no_data = true;
+      pred = std::nullopt;
+      stu = nullptr;
+    }
+    if (stu != nullptr &&
+        (has_time(stu->arrival()) || has_time(stu->departure()))) {
+      no_data = false;
+    }
+    if (i != 0U) {
+      set(i, event_type::kArr,
+          stu != nullptr && has_time(stu->arrival()) ? &stu->arrival()
+                                                     : nullptr);
+    }
+    if (i + 1U != n_stops) {
+      // Without a first departure, the first arrival starts the copy.
+      auto const* const dep = stu == nullptr               ? nullptr
+                              : has_time(stu->departure()) ? &stu->departure()
+                              : i == 0U && has_time(stu->arrival())
+                                  ? &stu->arrival()
+                                  : nullptr;
+      set(i, event_type::kDep, dep);
+    }
+  }
+  return true;
 }
 
 statistics gtfsrt_update_msg(timetable const& tt,
