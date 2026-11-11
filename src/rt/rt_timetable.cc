@@ -41,9 +41,6 @@ rt_transport_idx_t rt_timetable::add_rt_transport(
     additional_trips_.at(src).ids_.store(new_trip_id);
     additional_trips_.at(src).transports_.emplace_back(rt_t_idx);
     rt_transport_static_transport_.emplace_back(rt_add_idx);
-    if (t.is_valid()) {
-      duplicated_static_transport_.emplace(rt_t, t);
-    }
   }
 
   auto const r =

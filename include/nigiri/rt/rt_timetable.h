@@ -39,6 +39,14 @@ using change_callback_t =
                        std::optional<bool> const in_out_allowed,
                        std::optional<duration_t> const delay)>;
 
+// Static trip a GTFS-RT DUPLICATED copy runs: stop i of the copy is stop
+// `from_ + i` of the static transport `t_`.
+struct duplicated_trip {
+  transport t_;
+  stop_idx_t from_;
+  trip_idx_t trip_;
+};
+
 // General note:
 // - To deactivate bits for static transports that are updated with delays,
 //   rerouting (incl. track changes) or cancellations (without changing the
@@ -166,20 +174,22 @@ struct rt_timetable {
   std::variant<translation_idx_t, std::string_view> trip_short_name(
       timetable const& tt, rt_transport_idx_t const t) const {
     if (rt_transport_trip_short_names_[t].empty()) {
-      auto const static_display_name = [&](transport const x)
-          -> std::variant<translation_idx_t, std::string_view> {
-        auto const trip_idx =
-            tt.merged_trips_[tt.transport_to_trip_section_[x.t_idx_].front()]
-                .front();
-        return tt.trip_display_names_[trip_idx];
-      };
       return rt_transport_static_transport_[t].apply(utl::overloaded{
-          static_display_name,
+          [&](transport const x)
+              -> std::variant<translation_idx_t, std::string_view> {
+            auto const trip_idx =
+                tt.merged_trips_[tt.transport_to_trip_section_[x.t_idx_]
+                                     .front()]
+                    .front();
+            return tt.trip_display_names_[trip_idx];
+          },
           [&](rt_add_trip_id_idx_t)
               -> std::variant<translation_idx_t, std::string_view> {
-            auto const dup = duplicated_from(t);
-            return dup.is_valid() ? static_display_name(dup)
-                                  : std::string_view{"?"};
+            auto const* const dup = duplicated_from(t);
+            if (dup != nullptr) {
+              return tt.trip_display_names_[dup->trip_];
+            }
+            return std::string_view{"?"};
           }});
     } else {
       return rt_transport_trip_short_names_[t].view();
@@ -208,11 +218,12 @@ struct rt_timetable {
     return holds_alternative<transport>(t) ? t.as<transport>() : transport{};
   }
 
-  // Static transport whose schedule a GTFS-RT DUPLICATED trip copies, or an
-  // invalid transport if `rt_t` is not such a copy.
-  transport duplicated_from(rt_transport_idx_t const rt_t) const noexcept {
-    auto const it = duplicated_static_transport_.find(rt_t);
-    return it == end(duplicated_static_transport_) ? transport{} : it->second;
+  // The static trip a GTFS-RT DUPLICATED copy runs, or nullptr if `rt_t` is
+  // not such a copy.
+  duplicated_trip const* duplicated_from(
+      rt_transport_idx_t const rt_t) const noexcept {
+    auto const it = duplicated_trips_.find(rt_t);
+    return it == end(duplicated_trips_) ? nullptr : &it->second;
   }
 
   rt_transport_idx_t resolve_rt(transport const t) const noexcept {
@@ -275,11 +286,11 @@ struct rt_timetable {
   vector_map<rt_transport_idx_t, variant<transport, rt_add_trip_id_idx_t>>
       rt_transport_static_transport_;
 
-  // Additional trip (DUPLICATED copy) -> static transport it duplicates.
-  // A copy is an additional trip with its own trip id, so it never takes the
-  // static transport's slot in static_trip_lookup_. Its scheduled times are
-  // the static transport's.
-  hash_map<rt_transport_idx_t, transport> duplicated_static_transport_;
+  // Additional trip (DUPLICATED copy) -> static trip it runs. A copy is an
+  // additional trip with its own trip id and only the trip's stops, so it
+  // never takes the static transport's slot in static_trip_lookup_. Its
+  // scheduled times are the static trip's.
+  hash_map<rt_transport_idx_t, duplicated_trip> duplicated_trips_;
 
   struct additional_trips {
     string_store<rt_add_trip_id_idx_t> ids_;

@@ -19,7 +19,8 @@ using namespace std::string_literals;
 // Two vehicles report the same scheduled trip. The feed keeps one on the
 // scheduled trip and sends the other as a DUPLICATED copy with its own trip
 // id. The copy must get its own realtime transport and never overwrite the
-// scheduled run's times.
+// scheduled run's times. TRIP_1 follows TRIP_0 in a block: the copy only runs
+// TRIP_1's stops.
 
 namespace {
 
@@ -44,11 +45,14 @@ route_id,agency_id,route_short_name,route_long_name,route_type
 ROUTE_1,AGENCY_1,139,,3
 
 # trips.txt
-route_id,service_id,trip_id,trip_headsign,trip_short_name
-ROUTE_1,SERVICE_1,TRIP_1,C,T1
+route_id,service_id,trip_id,trip_headsign,trip_short_name,block_id
+ROUTE_1,SERVICE_1,TRIP_0,A,T0,BLOCK_1
+ROUTE_1,SERVICE_1,TRIP_1,C,T1,BLOCK_1
 
 # stop_times.txt
 trip_id,arrival_time,departure_time,stop_id,stop_sequence
+TRIP_0,09:00:00,09:00:00,C,1
+TRIP_0,09:50:00,09:50:00,A,2
 TRIP_1,10:00:00,10:00:00,A,1
 TRIP_1,10:30:00,10:30:00,B,2
 TRIP_1,11:00:00,11:00:00,C,3
@@ -143,6 +147,8 @@ TEST_F(duplicated_fixture, copy_does_not_overwrite_the_scheduled_run) {
   ASSERT_TRUE(original.is_rt());
   ASSERT_TRUE(original.is_scheduled());
   auto const fr = frun{tt_, &rtt_, original};
+  ASSERT_EQ(4U, fr.size());  // TRIP_0 and TRIP_1 are one block
+  ASSERT_EQ(3U, original.stop_range_.size());
   EXPECT_EQ(at(35), fr[1].time(event_type::kArr));
   EXPECT_EQ(at(65), fr[2].time(event_type::kArr));
 
@@ -159,7 +165,8 @@ TEST_F(duplicated_fixture, copy_does_not_overwrite_the_scheduled_run) {
   // The copy keeps the static schedule, so it shows its delay.
   EXPECT_EQ(at(30), copy_fr[1].scheduled_time(event_type::kArr));
   EXPECT_EQ(10min, copy_fr[1].delay(event_type::kArr));
-  EXPECT_EQ("T1", copy_fr[0].trip_short_name(event_type::kDep, {}));
+  EXPECT_EQ(fr[0].trip_short_name(event_type::kDep, {}),
+            copy_fr[0].trip_short_name(event_type::kDep, {}));
   EXPECT_EQ(clasz::kBus, copy_fr.get_clasz());
 }
 
