@@ -31,10 +31,12 @@ agency_name,agency_url,agency_timezone,agency_lang,agency_phone,agency_id
 test,https://test.com,Europe/Berlin,DE,0800123456,AGENCY_1
 
 # stops.txt
-stop_id,stop_name,stop_lat,stop_lon
-A,A,0.01,0.01
-B,B,0.02,0.02
-C,C,0.03,0.03
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
+A,A,0.01,0.01,0,
+P,B,0.02,0.02,1,
+B,B,0.02,0.02,0,P
+B2,B,0.02,0.02,0,P
+C,C,0.03,0.03,0,
 
 # calendar_dates.txt
 service_id,date,exception_type
@@ -150,6 +152,11 @@ unixtime_t at(int const minutes_after_start) {
   return unixtime_t{std::chrono::duration_cast<i32_minutes>(
       std::chrono::seconds{kTripStart} +
       std::chrono::minutes{minutes_after_start})};
+}
+
+// The stop's own id (run_stop::id() names the parent station).
+std::string_view platform(timetable const& tt, run_stop const& s) {
+  return tt.locations_.ids_[s.get_location_idx()].view();
 }
 
 struct duplicated_fixture : public testing::Test {
@@ -301,4 +308,22 @@ TEST_F(duplicated_fixture, copy_undoes_a_skipped_stop) {
           "TRIP_1", R"({"stopSequence": 1, "departure": {"delay": 0}})")));
   auto const [copy, __] = resolve(tt_, rtt_, "TRIP_1~BUS_B");
   EXPECT_FALSE((frun{tt_, &rtt_, copy}[1].is_cancelled()));
+}
+
+// A stop_id other than the static one, with a stop_sequence, moves the copy
+// to that platform, and back when a later update no longer has it.
+TEST_F(duplicated_fixture, copy_changes_platform) {
+  gtfsrt_update_buf(tt_, rtt_, source_idx_t{0}, "",
+                    json_to_protobuf(copy_feed("TRIP_1", R"(
+        {"stopSequence": 2, "stopId": "B2", "arrival": {"delay": 0}})")));
+  auto const [moved, _] = resolve(tt_, rtt_, "TRIP_1~BUS_B");
+  ASSERT_TRUE(moved.is_rt());
+  EXPECT_EQ("B2", platform(tt_, frun{tt_, &rtt_, moved}[1]));
+
+  gtfsrt_update_buf(
+      tt_, rtt_, source_idx_t{0}, "",
+      json_to_protobuf(copy_feed(
+          "TRIP_1", R"({"stopSequence": 1, "departure": {"delay": 0}})")));
+  auto const [back, __] = resolve(tt_, rtt_, "TRIP_1~BUS_B");
+  EXPECT_EQ("B", platform(tt_, frun{tt_, &rtt_, back}[1]));
 }

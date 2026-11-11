@@ -816,9 +816,13 @@ bool update_duplicated_run(source_idx_t const src,
         out.clear_schedule_relationship();
       }
     }
-    if (!out.has_stop_id()) {
-      out.set_stop_id(std::string{stop_id(i)});
+    // Matched by the static stop: a different stop_id (with a stop_sequence)
+    // is a stop change, which update_run takes as assigned_stop_id.
+    if (out.has_stop_id() && out.stop_id() != stop_id(i) &&
+        !out.stop_time_properties().has_assigned_stop_id()) {
+      out.mutable_stop_time_properties()->set_assigned_stop_id(out.stop_id());
     }
+    out.set_stop_id(std::string{stop_id(i)});
   }
   if (!update_run(src, tt, rtt, trip_idx_t::invalid(), copy, stops_update)) {
     return false;
